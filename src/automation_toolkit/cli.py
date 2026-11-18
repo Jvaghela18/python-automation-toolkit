@@ -1,9 +1,11 @@
-"""Command-line interface: organize, report, weekly, undo.
+"""Command-line interface: organize, report, weekly, scan, undo.
 
 Usage:
     python -m automation_toolkit organize ~/Downloads --dry-run
     python -m automation_toolkit organize ~/Downloads --by-date
     python -m automation_toolkit report ~/Documents --days 7
+    python -m automation_toolkit scan ~/Downloads --save-baseline baseline.json
+    python -m automation_toolkit scan ~/Downloads --baseline baseline.json
     python -m automation_toolkit weekly ~/Downloads   # organize + report
     python -m automation_toolkit undo <log-file.json>
 """
@@ -14,7 +16,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import __version__, organizer, report
+from . import __version__, organizer, report, security
 
 
 def _print_summary(summary: dict) -> None:
@@ -52,6 +54,19 @@ def main(argv: list[str] | None = None) -> int:
     p_rep.add_argument("folder", type=Path)
     p_rep.add_argument("--days", type=int, default=7)
     p_rep.add_argument("--output-dir", type=Path, default=None)
+    p_rep.add_argument("--baseline", type=Path, default=None,
+                       help="Baseline JSON from 'scan --save-baseline': "
+                            "also flag files changed, new or gone since it.")
+
+    p_scan = sub.add_parser(
+        "scan", help="Flag risky files: double extensions, executables, "
+                     "scripts, and changes since a baseline.")
+    p_scan.add_argument("folder", type=Path)
+    p_scan.add_argument("--baseline", type=Path, default=None,
+                        help="Baseline JSON to compare against.")
+    p_scan.add_argument("--save-baseline", type=Path, default=None,
+                        help="Save a SHA-256 snapshot of the folder to "
+                             "this file for later runs to compare against.")
 
     p_week = sub.add_parser("weekly",
                             help="Organize a folder, then write its weekly report.")
@@ -59,6 +74,7 @@ def main(argv: list[str] | None = None) -> int:
     p_week.add_argument("--days", type=int, default=7)
     p_week.add_argument("--by-date", action="store_true")
     p_week.add_argument("--dry-run", action="store_true")
+    p_week.add_argument("--baseline", type=Path, default=None)
 
     p_undo = sub.add_parser("undo", help="Reverse an organize run from its log.")
     p_undo.add_argument("log", type=Path)
@@ -72,16 +88,39 @@ def main(argv: list[str] | None = None) -> int:
                 dry_run=args.dry_run))
         elif args.command == "report":
             result = report.write_report(args.folder, days=args.days,
-                                         output_dir=args.output_dir)
+                                         output_dir=args.output_dir,
+                                         baseline=args.baseline)
             data = result["data"]
             print(f"Report: {data['total_files']} file(s), "
                   f"{data['total_bytes']:,} bytes over {data['days']} days.")
             print(f"Markdown: {result['markdown']}")
             print(f"CSV: {result['csv']}")
+            if data["security"]["findings"]:
+                print(f"Security: {len(data['security']['findings'])} "
+                      f"finding(s) — see the report.")
+        elif args.command == "scan":
+            base = args.baseline
+            if base is not None and not Path(base).exists():
+                print(f"Error: baseline not found: {base}", file=sys.stderr)
+                return 1
+            result = security.scan(args.folder, baseline=base)
+            if result["findings"]:
+                print(f"{len(result['findings'])} finding(s) in "
+                      f"{result['total_files']} file(s):")
+                for f in result["findings"]:
+                    print(f"  [{f['kind']}] {f['path']}")
+            else:
+                print(f"No risky files in {result['total_files']} file(s).")
+            if args.save_baseline:
+                saved = security.save_baseline(args.folder,
+                                               args.save_baseline)
+                print(f"Baseline saved: {saved['path']} "
+                      f"({saved['files']} file(s))")
         elif args.command == "weekly":
             _print_summary(organizer.organize(
                 args.folder, by_date=args.by_date, dry_run=args.dry_run))
-            result = report.write_report(args.folder, days=args.days)
+            result = report.write_report(args.folder, days=args.days,
+                                         baseline=args.baseline)
             print(f"Report: {result['markdown']}")
             print(f"CSV: {result['csv']}")
         elif args.command == "undo":

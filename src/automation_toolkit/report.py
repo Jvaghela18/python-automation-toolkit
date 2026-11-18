@@ -12,6 +12,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from . import security
 from .organizer import categorize
 
 TOP_LARGEST = 10
@@ -26,8 +27,14 @@ def _human_size(num_bytes: int) -> str:
 
 
 def collect(source: Path, *, days: int = 7,
-            end: datetime | None = None) -> dict:
-    """Collect file stats for the ``days`` ending at ``end`` (default: now)."""
+            end: datetime | None = None,
+            baseline: Path | None = None) -> dict:
+    """Collect file stats for the ``days`` ending at ``end`` (default: now).
+
+    When ``baseline`` is given (a baseline JSON from ``security.scan``),
+    files changed or new since that snapshot are flagged too, and files
+    in the baseline that are gone are listed as missing.
+    """
     source = Path(source)
     if not source.is_dir():
         raise FileNotFoundError(f"Folder not found: {source}")
@@ -42,8 +49,10 @@ def collect(source: Path, *, days: int = 7,
     for item in sorted(source.rglob("*")):
         if not item.is_file() or item.name.startswith("."):
             continue
-        # Skip our own logs and generated reports.
+        # Skip our own logs and generated reports, and the baseline file.
         if ".automation-logs" in item.parts or item.parent.name == "reports":
+            continue
+        if baseline is not None and item.resolve() == Path(baseline).resolve():
             continue
         mtime = datetime.fromtimestamp(item.stat().st_mtime)
         if not (start <= mtime <= end):
@@ -58,9 +67,42 @@ def collect(source: Path, *, days: int = 7,
             "day": mtime.date().isoformat(),
         })
 
+    # Security flags for the files in this period: double extensions,
+    # executables, scripts — plus changed/new/missing vs the baseline.
+    security_findings: list[dict] = []
+    for f in files:
+        finding = security.check_file(Path(f["path"]))
+        if finding is not None:
+            security_findings.append({**finding, "path": f["path"]})
+    base = security.load_baseline(baseline) if baseline is not None else None
+    if base is not None:
+        for f in files:
+            old = base.get(f["path"])
+            if old is None:
+                security_findings.append({
+                    "path": f["path"], "kind": "new",
+                    "detail": f"New since baseline: {f['path']}",
+                })
+            elif old.get("sha256") != security.file_sha256(
+                    source / f["path"]):
+                security_findings.append({
+                    "path": f["path"], "kind": "changed",
+                    "detail": f"Content changed since baseline: {f['path']}",
+                })
+        for rel in sorted(base):
+            if not (source / rel).exists():
+                security_findings.append({
+                    "path": rel, "kind": "missing",
+                    "detail": f"Gone since baseline: {rel}",
+                })
+
     by_day: dict[str, list[dict]] = defaultdict(list)
     for f in files:
         by_day[f["day"]].append(f)
+
+    kinds: dict[str, int] = {}
+    for f in security_findings:
+        kinds[f["kind"]] = kinds.get(f["kind"], 0) + 1
 
     return {
         "source": str(source),
@@ -75,6 +117,7 @@ def collect(source: Path, *, days: int = 7,
         "largest": sorted(files, key=lambda f: f["size_bytes"],
                           reverse=True)[:TOP_LARGEST],
         "files": files,
+        "security": {"findings": security_findings, "by_kind": kinds},
     }
 
 
@@ -112,14 +155,18 @@ def to_markdown(data: dict) -> str:
     else:
         lines.append("- (none)")
     lines.append("")
+    section = security.to_markdown_section(data.get("security", {}))
+    if section:
+        lines.append(section)
     return "\n".join(lines)
 
 
 def write_report(source: Path, *, days: int = 7,
                  output_dir: Path | None = None,
-                 end: datetime | None = None) -> dict:
+                 end: datetime | None = None,
+                 baseline: Path | None = None) -> dict:
     """Collect stats and write the .md report + .csv summary. Returns paths."""
-    data = collect(source, days=days, end=end)
+    data = collect(source, days=days, end=end, baseline=baseline)
     output_dir = Path(output_dir) if output_dir else Path(source) / "reports"
     output_dir.mkdir(parents=True, exist_ok=True)
     stamp = data["end"]

@@ -20,6 +20,12 @@ Two repetitive tasks, automated in pure Python (stdlib only, no dependencies):
 2. **Weekly report generator** — scans a folder for the last 7 days and
    writes a Markdown report + CSV summary: files changed, per-day counts,
    breakdown by category, and the largest files.
+3. **File-integrity + security scan** — a tiny Tripwire-style check that
+   flags double extensions (`invoice.pdf.exe`), executable files that
+   appeared in the folder, script files, and — against a saved baseline —
+   files whose SHA-256 hash changed, files that are new, and files that
+   went missing. The weekly report includes a Security findings section
+   when there is anything to flag.
 
 ## Run it
 
@@ -41,6 +47,16 @@ PYTHONPATH=src python -m automation_toolkit weekly ~/Downloads
 
 # 6. Undo an organize run (uses the log it wrote)
 PYTHONPATH=src python -m automation_toolkit undo ~/Downloads/.automation-logs/organize-2026-11-17-090000.json
+
+# 7. Security scan — flag risky files in a folder
+PYTHONPATH=src python -m automation_toolkit scan ~/Downloads
+
+# 8. Save a baseline snapshot, then compare later runs against it
+PYTHONPATH=src python -m automation_toolkit scan ~/Downloads --save-baseline ~/baseline.json
+PYTHONPATH=src python -m automation_toolkit scan ~/Downloads --baseline ~/baseline.json
+
+# 9. Weekly report that also flags changed / new / missing files
+PYTHONPATH=src python -m automation_toolkit report ~/Documents --baseline ~/baseline.json
 ```
 
 ## Safety rules
@@ -58,10 +74,12 @@ PYTHONPATH=src python -m automation_toolkit undo ~/Downloads/.automation-logs/or
 python -m unittest discover -s tests -v
 ```
 
-17 tests: organizer (categorize, move, dry-run, duplicates, hidden files,
-by-date, already-organized, undo, missing folder) and report (date filter,
+28 tests: organizer (categorize, move, dry-run, duplicates, hidden files,
+by-date, already-organized, undo, missing folder), report (date filter,
 per-day/extension grouping, Markdown, empty period, MD + CSV output,
-invalid input).
+invalid input), and security (double extension, executable, script,
+hidden files skipped, baseline unchanged / changed / new / missing,
+report integration with and without findings).
 
 ## Example output
 
@@ -86,6 +104,12 @@ Undo log: ~/Downloads/.automation-logs/organize-2026-11-17-090000.json
 - The organizer sorts by file extension, not by reading file contents —
   a `.txt` file that is really a photo is still filed as a Document.
 - The weekly report uses last-modified time, not creation time.
+- The security scan is also extension-based for the risky-file flags —
+  it does not inspect file contents or run antivirus signatures, and a
+  renamed executable (e.g. `setup.txt` that is really an `.exe`) will
+  not be caught. The hash check only catches changes to files that were
+  in the baseline; a baseline is a snapshot of one folder, not a system
+  monitor.
 - No cloud sync, no scheduling built in: run it yourself, or schedule it
   with `cron` (macOS/Linux) / Task Scheduler (Windows), e.g.
   `0 9 * * MON PYTHONPATH=... python -m automation_toolkit weekly ~/Downloads`.
